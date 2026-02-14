@@ -1,0 +1,289 @@
+openapi: 3.0.3
+info:
+  title: Gali - RAG Chatbot API
+  description: |
+    REST API for the Gali serverless RAG chatbot.
+    Gali is a Retrieval Augmented Generation chatbot built on AWS, using
+    Amazon Bedrock for embeddings and LLM inference, DynamoDB for chat
+    persistence, and LanceDB (S3-backed) for vector storage.
+
+    All endpoints are served behind Amazon CloudFront with AWS WAF.
+  version: 1.0.0
+  contact:
+    name: Gali Team
+
+servers:
+  - url: https://api.example.com
+    description: Production (CloudFront distribution)
+
+tags:
+  - name: Chat
+    description: Chat session management and messaging
+
+paths:
+  /chat:
+    post:
+      tags:
+        - Chat
+      summary: Create a new chat session
+      description: |
+        Creates a new chat session and returns a unique chat ID (UUID v4).
+        The chat is stored in DynamoDB with an empty message history and a
+        `createdAt` timestamp. Chats expire after 24 hours.
+      operationId: createChat
+      responses:
+        "201":
+          description: Chat session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+              example:
+                chatId: "550e8400-e29b-41d4-a716-446655440000"
+                messages: []
+                createdAt: "2026-02-11T10:30:00Z"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "InternalServerError"
+                message: "Failed to create chat session"
+
+  /chat/{chatId}:
+    get:
+      tags:
+        - Chat
+      summary: Validate a chat session
+      description: |
+        Validates whether a chat session exists by its ID.
+
+        - If the chat **exists**, returns the chat session with its message history (HTTP 200).
+        - If the chat **does not exist** (e.g., expired and deleted), a **new chat session
+          is automatically created** with a new UUID and returned (HTTP 201).
+
+        The frontend should check the response status code and update its local `chatId`
+        reference if a 201 is received.
+      operationId: validateChat
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      responses:
+        "200":
+          description: Chat session exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+              example:
+                chatId: "550e8400-e29b-41d4-a716-446655440000"
+                messages:
+                  - sender: "user"
+                    message: "What is serverless RAG?"
+                  - sender: "agent"
+                    message: "Serverless RAG combines retrieval augmented generation with serverless architecture..."
+                createdAt: "2026-02-11T10:30:00Z"
+        "201":
+          description: Chat session did not exist; a new one was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+              example:
+                chatId: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                messages: []
+                createdAt: "2026-02-11T12:00:00Z"
+        "400":
+          description: Invalid chat ID format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "BadRequest"
+                message: "Invalid chatId format. Expected UUID v4."
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "InternalServerError"
+                message: "Failed to validate chat session"
+
+  /chat/{chatId}/message:
+    post:
+      tags:
+        - Chat
+      summary: Send a message and receive an agent response
+      description: |
+        Sends the full conversation history to the RAG pipeline. The system:
+
+        1. Fetches the existing chat from DynamoDB.
+        2. Embeds the latest user message using Amazon Bedrock Titan Embeddings.
+        3. Performs a vector similarity search in LanceDB to retrieve relevant documents.
+        4. Constructs an augmented prompt with the retrieved documents and chat history.
+        5. Sends the prompt to the foundation model (via Bedrock) to generate a response.
+        6. Appends the agent's response to the message history.
+        7. Saves the updated chat to DynamoDB.
+        8. Returns the full updated message list.
+      operationId: sendMessage
+      parameters:
+        - $ref: "#/components/parameters/ChatIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+            example:
+              chatId: "550e8400-e29b-41d4-a716-446655440000"
+              messages:
+                - sender: "user"
+                  message: "What is serverless RAG?"
+      responses:
+        "200":
+          description: Agent response generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+              example:
+                chatId: "550e8400-e29b-41d4-a716-446655440000"
+                messages:
+                  - sender: "user"
+                    message: "What is serverless RAG?"
+                  - sender: "agent"
+                    message: "Serverless RAG combines the advanced language processing capabilities of foundation models with serverless architecture. It allows for dynamic retrieval of information from external sources, enabling generation of content that is accurate, contextually rich, and up-to-date."
+        "400":
+          description: Invalid request body or chat ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "BadRequest"
+                message: "Request body must contain 'chatId' and 'messages' array"
+        "404":
+          description: Chat session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "NotFound"
+                message: "Chat session not found. Please create a new chat."
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "InternalServerError"
+                message: "Failed to process message"
+
+components:
+  parameters:
+    ChatIdPath:
+      name: chatId
+      in: path
+      required: true
+      description: Unique identifier for the chat session (UUID v4)
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440000"
+
+  schemas:
+    Message:
+      type: object
+      required:
+        - sender
+        - message
+      properties:
+        sender:
+          type: string
+          enum:
+            - user
+            - agent
+          description: Who sent the message
+          example: "user"
+        message:
+          type: string
+          description: The text content of the message
+          example: "What is serverless RAG?"
+
+    ChatSession:
+      type: object
+      required:
+        - chatId
+        - messages
+        - createdAt
+      properties:
+        chatId:
+          type: string
+          format: uuid
+          description: Unique identifier for the chat session
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+          description: Ordered list of messages in the conversation
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when the chat was created
+          example: "2026-02-11T10:30:00Z"
+
+    ChatRequest:
+      type: object
+      required:
+        - chatId
+        - messages
+      properties:
+        chatId:
+          type: string
+          format: uuid
+          description: The chat session ID
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+          description: Full conversation history including the new user message
+
+    ChatResponse:
+      type: object
+      required:
+        - chatId
+        - messages
+      properties:
+        chatId:
+          type: string
+          format: uuid
+          description: The chat session ID
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+          description: Full conversation history with the agent's response appended
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error code
+          example: "BadRequest"
+        message:
+          type: string
+          description: Human-readable error description
+          example: "Invalid request parameters"

@@ -1,0 +1,14 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# LanceDB local data
+.lancedb/
+lancedb_store/
+
+# Python
+venv/
+.vscode/

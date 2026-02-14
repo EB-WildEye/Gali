@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # Path to the LanceDB on-disk database directory
     LANCEDB_PATH: Path = BASE_DIR / "data" / "lancedb"
 
+    # ── Environment Mode ───────────────────────────────────────────────
+    # "dev" = verbose logging (DEBUG), "prod" = quiet logging (WARNING)
+    ENV: str = "dev"
+
     # ── API Keys ───────────────────────────────────────────────────────
     GOOGLE_API_KEY: str = "your_google_api_key_here"
 

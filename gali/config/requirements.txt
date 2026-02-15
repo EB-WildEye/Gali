@@ -2,5 +2,7 @@ streamlit>=1.30.0
 lancedb>=0.4.0
 langchain-google-genai>=1.0.0
 langchain>=0.2.0
+langchain-experimental>=0.0.50
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
+pyarrow>=14.0.0

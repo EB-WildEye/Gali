@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import lancedb
 import pyarrow as pa
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from gali.config.settings import settings
 from gali.src.utils.logger import get_logger
@@ -64,7 +65,7 @@ class GaliVectorStore:
     # ── Constructor ───────────────────────────────────────────────────
     def __init__(self, embedder: Any, db_path: Optional[str] = None, table_name: Optional[str] = None) -> None:
         
-        self.embedder = embedder
+        self.embedder = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", google_api_key=settings.GOOGLE_API_KEY)
         self._db_path = str(db_path or settings.LANCEDB_PATH)
         self._table_name = table_name or settings.LANCEDB_TABLE_NAME
 

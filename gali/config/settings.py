@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 50
 
     # ── Model Configuration ────────────────────────────────────────────
-    EMBEDDING_MODEL: str = "models/embedding-001"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     LLM_MODEL: str = "gemini-2.0-flash"
 
     # ── LanceDB ────────────────────────────────────────────────────────

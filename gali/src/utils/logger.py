@@ -50,10 +50,7 @@ def get_logger(name: str, level: int | None = None) -> logging.Logger:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(resolved_level)
 
-        formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+        formatter = logging.Formatter(fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 

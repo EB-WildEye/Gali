@@ -1,49 +1,76 @@
 """
 Gali - Centralized Configuration
 =================================
-Uses pydantic-settings (BaseSettings) to load environment variables
-and define absolute paths for all critical directories.
+Uses ``pydantic-settings`` (``BaseSettings``) to load *all* configuration
+from environment variables and the project-level ``.env`` file.
 
-All paths are computed relative to BASE_DIR (the `gali/` package root),
-ensuring portability across environments.
+Security
+--------
+- ``GOOGLE_API_KEY`` is typed as ``SecretStr`` and has **no default value**.
+  If the key is missing at startup, Pydantic will raise a ``ValidationError``
+  with a clear error message.  The raw value is never exposed in repr,
+  logs, or tracebacks.
+
+Paths
+-----
+All filesystem paths are ``Path.resolve()``-d at class level so they
+work identically on Windows, WSL, and Linux.
+
+Concurrency
+-----------
+``MAX_WORKERS`` controls the ``ThreadPoolExecutor`` pool size in the
+ingestion pipeline (default 4 — optimal for I/O-bound Gemini API calls).
 """
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Literal
+
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """
-    Application-wide settings loaded from environment variables and .env file.
+    Application-wide settings.
 
-    Attributes:
-        GOOGLE_API_KEY: API key for Google AI Studio (Gemini).
-        CHUNK_SIZE: Number of characters per text chunk during ingestion.
-        CHUNK_OVERLAP: Number of overlapping characters between consecutive chunks.
-        EMBEDDING_MODEL: The embedding model identifier used for vectorisation.
-        LLM_MODEL: The LLM model identifier used for response generation.
-        LANCEDB_TABLE_NAME: Name of the table inside the LanceDB database.
+    Every field is loaded from environment variables (or ``.env``).
+    Fields *without* a default are **required** — the app will refuse
+    to start until they are provided.
+
+    Attributes
+    ----------
+    GOOGLE_API_KEY : SecretStr
+        API key for Google AI Studio (Gemini).  **Required.**
+        Access the raw value with ``settings.GOOGLE_API_KEY.get_secret_value()``.
+    ENV : Literal["dev", "prod"]
+        Environment mode controlling logging verbosity.
+    CHUNK_SIZE : int
+        Target character count per text chunk during ingestion.
+    CHUNK_OVERLAP : int
+        Overlap between consecutive chunks (for future sliding-window use).
+    EMBEDDING_MODEL : str
+        Model identifier passed to ``GoogleGenerativeAIEmbeddings``.
+    LLM_MODEL : str
+        Model identifier for the response-generation LLM.
+    LANCEDB_TABLE_NAME : str
+        Table name inside the LanceDB on-disk database.
+    MAX_WORKERS : int
+        Thread pool size for parallel file ingestion.
     """
 
     # ── Resolved Absolute Paths ────────────────────────────────────────
-    # BASE_DIR points to the `gali/` package root (parent of `config/`).
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
-
-    # Directory containing raw input documents (.txt, .pdf, etc.)
     DATA_RAW_DIR: Path = BASE_DIR / "data" / "raw"
-
-    # Directory for ingestion logs and processing metadata
     DATA_PROCESSED_DIR: Path = BASE_DIR / "data" / "processed"
-
-    # Path to the LanceDB on-disk database directory
     LANCEDB_PATH: Path = BASE_DIR / "data" / "lancedb"
 
     # ── Environment Mode ───────────────────────────────────────────────
-    # "dev" = verbose logging (DEBUG), "prod" = quiet logging (WARNING)
-    ENV: str = "dev"
+    ENV: Literal["dev", "prod"] = "dev"
 
-    # ── API Keys ───────────────────────────────────────────────────────
-    GOOGLE_API_KEY: str = "your_google_api_key_here"
+    # ── API Keys (REQUIRED — no default) ───────────────────────────────
+    GOOGLE_API_KEY: SecretStr
 
     # ── Ingestion Parameters ───────────────────────────────────────────
     CHUNK_SIZE: int = 500
@@ -56,14 +83,31 @@ class Settings(BaseSettings):
     # ── LanceDB ────────────────────────────────────────────────────────
     LANCEDB_TABLE_NAME: str = "gali_docs"
 
+    # ── Concurrency ────────────────────────────────────────────────────
+    MAX_WORKERS: int = 4
+
+    # ── Validators ─────────────────────────────────────────────────────
+
+    @field_validator("CHUNK_SIZE")
+    @classmethod
+    def _chunk_size_positive(cls, v: int) -> int:
+        if v < 50:
+            raise ValueError(f"CHUNK_SIZE must be ≥ 50, got {v}")
+        return v
+
+
+    @field_validator("MAX_WORKERS")
+    @classmethod
+    def _workers_range(cls, v: int) -> int:
+        if not 1 <= v <= 16:
+            raise ValueError(f"MAX_WORKERS must be 1–16, got {v}")
+        return v
+
     # ── Pydantic Settings Configuration ────────────────────────────────
-    model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parent.parent / ".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parent.parent / ".env", env_file_encoding="utf-8", extra="ignore")
 
 
 # ── Singleton Instance ─────────────────────────────────────────────────
-# Import this throughout the project:  from gali.config.settings import settings
+# Import this throughout the project:
+#     from gali.config.settings import settings
 settings = Settings()

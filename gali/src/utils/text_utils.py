@@ -15,24 +15,10 @@ import unicodedata
 from pathlib import Path
 
 
-# ── Protocol-type keywords → department mapping ───────────────────────
-# Case-insensitive keyword matching is used against the full filename.
-# Extend this map as new source documents are added to the knowledge base.
-_PROTOCOL_KEYWORDS: list[tuple[str, str]] = [
-    ("induced", "gynecology"),
-    ("missed", "gynecology"),
-]
-
-_DEFAULT_PROTOCOL_TYPE = "unknown"
-_DEFAULT_DEPARTMENT = "general"
-
 # ── Non-printable character pattern ────────────────────────────────────
 # Matches control characters (C0/C1), except \n, \r, \t which we handle
 # separately. Also catches BOM, zero-width chars, soft hyphens, etc.
-_NON_PRINTABLE_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
-    r"\ufeff\u200b\u200c\u200d\u200e\u200f\u00ad\u2060\ufffe]"
-)
+_NON_PRINTABLE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufeff\u200b\u200c\u200d\u200e\u200f\u00ad\u2060\ufffe]")
 
 
 # ── Public API ─────────────────────────────────────────────────────────
@@ -59,23 +45,25 @@ def clean_text(text: str) -> str:
     Returns:
         Cleaned, normalised text ready for chunking.
     """
-    # 1. Unicode NFC normalisation
     text = unicodedata.normalize("NFC", text)
-
-    # 2. Strip non-printable characters and formatting artifacts
     text = _NON_PRINTABLE_RE.sub("", text)
-
-    # 3. Collapse horizontal whitespace (keep newlines intact)
     text = re.sub(r"[^\S\n]+", " ", text)
-
-    # 4. Strip each line
     lines = [line.strip() for line in text.splitlines()]
     text = "\n".join(lines)
-
-    # 5. Collapse excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text.strip()
+
+
+# ── Protocol-type keywords → department mapping ───────────────────────
+# Case-insensitive keyword matching is used against the full filename.
+# Extend this map as new source documents are added to the knowledge base.
+_PROTOCOL_KEYWORDS: list[tuple[str, str]] = [
+    ("induced", "gynecology"),
+    ("missed", "gynecology"),
+]
+
+_DEFAULT_PROTOCOL_TYPE = "unknown"
+_DEFAULT_DEPARTMENT = "general"
 
 
 def extract_metadata_from_filename(filename: str) -> dict[str, str]:
@@ -104,12 +92,6 @@ def extract_metadata_from_filename(filename: str) -> dict[str, str]:
 
     for keyword, department in _PROTOCOL_KEYWORDS:
         if keyword in stem:
-            return {
-                "protocol_type": keyword,
-                "department": department,
-            }
+            return {"protocol_type": keyword, "department": department}
 
-    return {
-        "protocol_type": _DEFAULT_PROTOCOL_TYPE,
-        "department": _DEFAULT_DEPARTMENT,
-    }
+    return {"protocol_type": _DEFAULT_PROTOCOL_TYPE, "department": _DEFAULT_DEPARTMENT}

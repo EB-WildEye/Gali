@@ -10,6 +10,8 @@ Security
   If the key is missing at startup, Pydantic will raise a ``ValidationError``
   with a clear error message.  The raw value is never exposed in repr,
   logs, or tracebacks.
+- ``MONGO_URI`` is also ``SecretStr`` — connection strings contain
+  credentials and must never leak into logs.
 
 Paths
 -----
@@ -44,6 +46,11 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY : SecretStr
         API key for Google AI Studio (Gemini).  **Required.**
         Access the raw value with ``settings.GOOGLE_API_KEY.get_secret_value()``.
+    MONGO_URI : SecretStr
+        MongoDB connection string (e.g. ``mongodb://localhost:27017``).
+        **Required.**  Contains credentials — never log raw value.
+    MONGO_DB_NAME : str
+        MongoDB database name for chat history / session storage.
     ENV : Literal["dev", "prod"]
         Environment mode controlling logging verbosity.
     CHUNK_SIZE : int
@@ -71,6 +78,10 @@ class Settings(BaseSettings):
 
     # ── API Keys (REQUIRED — no default) ───────────────────────────────
     GOOGLE_API_KEY: SecretStr
+
+    # ── MongoDB (REQUIRED — no default) ────────────────────────────────
+    MONGO_URI: SecretStr
+    MONGO_DB_NAME: str = "gali"
 
     # ── Ingestion Parameters ───────────────────────────────────────────
     CHUNK_SIZE: int = 500

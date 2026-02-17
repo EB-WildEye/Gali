@@ -7,6 +7,11 @@ CLI entry point that orchestrates:
     3. Run the ``IngestionPipeline``.
     4. Print a structured execution summary with timing breakdown.
 
+Flags:
+    --drop       Drop the LanceDB table before ingesting (cache preserved).
+    --purge      Drop table AND clear the hash cache (full re-ingestion).
+    --drop-only  Drop the table and exit immediately (no ingestion).
+
 Observability:
     The script times every initialization phase independently —
     settings load, embedder init, LanceDB connection — so the
@@ -14,7 +19,8 @@ Observability:
 
 Usage:
     python -m gali.scripts.setup_db              # Normal ingestion
-    python -m gali.scripts.setup_db --drop        # Drop table first, then ingest
+    python -m gali.scripts.setup_db --drop        # Drop table, re-ingest (skip cached)
+    python -m gali.scripts.setup_db --purge       # Drop table + cache, full re-ingest
     python -m gali.scripts.setup_db --drop-only   # Drop table and exit
 """
 
@@ -35,8 +41,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="setup_db", description="Gali — Initialise the vector database and run document ingestion.")
-    parser.add_argument("--drop", action="store_true", default=False, help="Drop the existing LanceDB table before ingesting.")
-    parser.add_argument("--drop-only", action="store_true", default=False, help="Drop the existing LanceDB table and exit (no ingestion).")
+    parser.add_argument("--drop", action="store_true", default=False, help="Drop the LanceDB table before ingesting (hash cache preserved).")
+    parser.add_argument("--purge", action="store_true", default=False, help="Drop the LanceDB table AND clear the hash cache (full clean re-ingestion).")
+    parser.add_argument("--drop-only", action="store_true", default=False, help="Drop the LanceDB table and exit (no ingestion).")
     return parser.parse_args()
 
 
@@ -90,9 +97,18 @@ def main() -> None:
     lancedb_ms = (time.perf_counter() - t_lancedb) * 1000
     logger.info("LanceDB connection established in %.1fms", lancedb_ms)
 
-    if args.drop or args.drop_only:
+    if args.drop or args.purge or args.drop_only:
         logger.warning("Dropping table '%s' as requested.", settings.LANCEDB_TABLE_NAME)
         store.drop_table()
+
+        # --purge also clears the hash cache for a full clean re-ingestion
+        if args.purge:
+            cache_path = settings.DATA_PROCESSED_DIR / "ingestion_hashes.json"
+            if cache_path.exists():
+                cache_path.unlink()
+                logger.warning("Hash cache deleted: %s", cache_path)
+            else:
+                logger.info("No hash cache to clear.")
 
         if args.drop_only:
             logger.info("--drop-only: Table dropped. Exiting.")
@@ -126,6 +142,9 @@ def _print_header(settings: object) -> None:
     api_key_val = settings.GOOGLE_API_KEY.get_secret_value()  # type: ignore[attr-defined]
     masked = f"****{api_key_val[-4:]}" if len(api_key_val) > 4 else "****"
 
+    mongo_uri_val = settings.MONGO_URI.get_secret_value()  # type: ignore[attr-defined]
+    mongo_masked = mongo_uri_val.split("@")[-1] if "@" in mongo_uri_val else mongo_uri_val
+
     print()
     print("=" * 60)
     print("  GALI — Vector Database Setup & Ingestion")
@@ -133,6 +152,7 @@ def _print_header(settings: object) -> None:
     print(f"  Environment  : {settings.ENV}")                   # type: ignore[attr-defined]
     print(f"  Embedding    : {settings.EMBEDDING_MODEL}")       # type: ignore[attr-defined]
     print(f"  LanceDB path : {settings.LANCEDB_PATH}")          # type: ignore[attr-defined]
+    print(f"  MongoDB      : {mongo_masked} (db: {settings.MONGO_DB_NAME})")  # type: ignore[attr-defined]
     print(f"  Source dir   : {settings.DATA_RAW_DIR}")           # type: ignore[attr-defined]
     print(f"  Chunk size   : {settings.CHUNK_SIZE} chars")      # type: ignore[attr-defined]
     print(f"  Workers      : {settings.MAX_WORKERS}")           # type: ignore[attr-defined]

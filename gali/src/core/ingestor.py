@@ -5,6 +5,11 @@ Production-ready OOP pipeline that reads raw documents, cleans and
 chunks them with a hybrid Hebrew-aware + semantic strategy, and
 persists the results into the ``GaliVectorStore``.
 
+Supported file formats:
+    • ``.txt``  — UTF-8 with cp1255 fallback for legacy Hebrew files.
+    • ``.pdf``  — Extracted via ``pypdf`` with page-level concatenation
+                  and robust fallback for encrypted / malformed PDFs.
+
 Key design decisions:
     • **Dependency Injection** – receives ``GaliVectorStore`` + embedder
       via constructor; both are typed with protocols, not concrete classes.
@@ -44,7 +49,7 @@ from gali.src.utils.text_utils import clean_text, extract_metadata_from_filename
 logger = get_logger(__name__)
 
 # File extensions the pipeline knows how to read
-_SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".txt", ".pdf", ".docx"})
+_SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".txt", ".pdf"})
 
 # ── Hebrew Q&A markers ────────────────────────────────────────────────
 _QA_SPLIT_PATTERN = re.compile(r"(?=שאלה\s*:)")
@@ -200,17 +205,95 @@ class IngestionPipeline:
     @staticmethod
     def _read_file(filepath: Path) -> str:
         """
-        Read a file and return its text content.
+        Route file reading to the appropriate extractor based on extension.
 
-        Supports ``.txt`` (UTF-8 with cp1255 fallback for legacy
-        Hebrew Windows files).  ``.pdf`` / ``.docx`` support can be
-        added by extending this method.
+        Supported:
+            • ``.txt``  — UTF-8 with cp1255 fallback.
+            • ``.pdf``  — Full text extraction via ``pypdf``.
+        """
+        ext = filepath.suffix.lower()
+
+        if ext == ".pdf":
+            return IngestionPipeline._read_pdf(filepath)
+
+        # Default: plain-text (.txt and any other text-based format)
+        return IngestionPipeline._read_text(filepath)
+
+
+    @staticmethod
+    def _read_text(filepath: Path) -> str:
+        """
+        Read a plain-text file with encoding fallback.
+
+        Tries UTF-8 first; falls back to cp1255 for legacy Hebrew
+        Windows files that use the Windows-1255 code page.
         """
         try:
             return filepath.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             logger.debug("UTF-8 decode failed for %s — retrying with cp1255.", filepath.name)
             return filepath.read_text(encoding="cp1255")
+
+
+    @staticmethod
+    def _read_pdf(filepath: Path) -> str:
+        """
+        Extract all text from a PDF using ``pypdf``.
+
+        Strategy (2025 best practices):
+            1. Open the PDF with ``pypdf.PdfReader``.
+            2. Skip encrypted PDFs that cannot be decrypted
+               with an empty password.
+            3. Iterate over every page and extract text via
+               ``page.extract_text()``.
+            4. Concatenate pages with double-newline separators
+               so downstream chunking can detect page boundaries.
+            5. Return the full concatenated text, or an empty
+               string if no text could be extracted (scanned PDF).
+
+        Args:
+            filepath: Absolute path to the ``.pdf`` file.
+
+        Returns:
+            Extracted text as a single string.  Empty string on failure.
+        """
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            logger.error("pypdf is not installed — cannot read PDF files. Run: uv add pypdf")
+            return ""
+
+        try:
+            reader = PdfReader(filepath)
+        except Exception:
+            logger.exception("Failed to open PDF: %s", filepath.name)
+            return ""
+
+        # Handle encrypted PDFs — try empty password first
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+                logger.debug("PDF '%s' decrypted with empty password.", filepath.name)
+            except Exception:
+                logger.warning("PDF '%s' is encrypted and cannot be decrypted — skipping.", filepath.name)
+                return ""
+
+        pages: list[str] = []
+        for page_num, page in enumerate(reader.pages):
+            try:
+                text = page.extract_text()
+                if text and text.strip():
+                    pages.append(text.strip())
+            except Exception:
+                logger.warning("Failed to extract text from page %d of '%s' — skipping page.", page_num + 1, filepath.name)
+                continue
+
+        if not pages:
+            logger.warning("PDF '%s' yielded no extractable text (possibly scanned/image-only).", filepath.name)
+            return ""
+
+        logger.info("PDF '%s' → %d page(s) extracted.", filepath.name, len(pages))
+        return "\n\n".join(pages)
 
     # ══════════════════════════════════════════════════════════════════
     #  CHUNKING ENGINE — Hybrid: Q&A Pairs → Semantic → Recursive

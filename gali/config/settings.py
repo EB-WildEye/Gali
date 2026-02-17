@@ -6,22 +6,22 @@ from environment variables and the project-level ``.env`` file.
 
 Security
 --------
-- ``GOOGLE_API_KEY`` is typed as ``SecretStr`` and has **no default value**.
-  If the key is missing at startup, Pydantic will raise a ``ValidationError``
-  with a clear error message.  The raw value is never exposed in repr,
-  logs, or tracebacks.
+- ``GOOGLE_API_KEY`` is typed as ``SecretStr`` — never exposed in logs.
 - ``MONGO_URI`` is also ``SecretStr`` — connection strings contain
-  credentials and must never leak into logs.
+  credentials and must never leak.
+
+RAG Engine
+----------
+``LLM_TEMPERATURE`` controls Gemini response creativity (0.0–1.0).
+``SESSION_HISTORY_LIMIT`` caps the chat messages sent to the LLM.
+``SEARCH_RESULTS_LIMIT`` controls vector results entering the prompt.
+``RELEVANCE_THRESHOLD`` filters out low-quality search results.
+``TOKEN_LIMIT`` triggers auto-summarization of long conversations.
 
 Paths
 -----
 All filesystem paths are ``Path.resolve()``-d at class level so they
 work identically on Windows, WSL, and Linux.
-
-Concurrency
------------
-``MAX_WORKERS`` controls the ``ThreadPoolExecutor`` pool size in the
-ingestion pipeline (default 4 — optimal for I/O-bound Gemini API calls).
 """
 
 from __future__ import annotations
@@ -40,31 +40,6 @@ class Settings(BaseSettings):
     Every field is loaded from environment variables (or ``.env``).
     Fields *without* a default are **required** — the app will refuse
     to start until they are provided.
-
-    Attributes
-    ----------
-    GOOGLE_API_KEY : SecretStr
-        API key for Google AI Studio (Gemini).  **Required.**
-        Access the raw value with ``settings.GOOGLE_API_KEY.get_secret_value()``.
-    MONGO_URI : SecretStr
-        MongoDB connection string (e.g. ``mongodb://localhost:27017``).
-        **Required.**  Contains credentials — never log raw value.
-    MONGO_DB_NAME : str
-        MongoDB database name for chat history / session storage.
-    ENV : Literal["dev", "prod"]
-        Environment mode controlling logging verbosity.
-    CHUNK_SIZE : int
-        Target character count per text chunk during ingestion.
-    CHUNK_OVERLAP : int
-        Overlap between consecutive chunks (for future sliding-window use).
-    EMBEDDING_MODEL : str
-        Model identifier passed to ``GoogleGenerativeAIEmbeddings``.
-    LLM_MODEL : str
-        Model identifier for the response-generation LLM.
-    LANCEDB_TABLE_NAME : str
-        Table name inside the LanceDB on-disk database.
-    MAX_WORKERS : int
-        Thread pool size for parallel file ingestion.
     """
 
     # ── Resolved Absolute Paths ────────────────────────────────────────
@@ -79,7 +54,7 @@ class Settings(BaseSettings):
     # ── API Keys (REQUIRED — no default) ───────────────────────────────
     GOOGLE_API_KEY: SecretStr
 
-    # ── MongoDB (REQUIRED — no default) ────────────────────────────────
+    # ── MongoDB (REQUIRED — no default for URI) ────────────────────────
     MONGO_URI: SecretStr
     MONGO_DB_NAME: str = "gali"
 
@@ -89,7 +64,14 @@ class Settings(BaseSettings):
 
     # ── Model Configuration ────────────────────────────────────────────
     EMBEDDING_MODEL: str = "gemini-embedding-001"
-    LLM_MODEL: str = "gemini-2.0-flash"
+    LLM_MODEL: str = "gemini-2.0-pro"
+    LLM_TEMPERATURE: float = 0.3
+
+    # ── RAG Engine ─────────────────────────────────────────────────────
+    SESSION_HISTORY_LIMIT: int = 10
+    SEARCH_RESULTS_LIMIT: int = 5
+    RELEVANCE_THRESHOLD: float = 1.5
+    TOKEN_LIMIT: int = 2000
 
     # ── LanceDB ────────────────────────────────────────────────────────
     LANCEDB_TABLE_NAME: str = "gali_docs"
@@ -112,6 +94,22 @@ class Settings(BaseSettings):
     def _workers_range(cls, v: int) -> int:
         if not 1 <= v <= 16:
             raise ValueError(f"MAX_WORKERS must be 1–16, got {v}")
+        return v
+
+
+    @field_validator("LLM_TEMPERATURE")
+    @classmethod
+    def _temperature_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"LLM_TEMPERATURE must be 0.0–1.0, got {v}")
+        return v
+
+
+    @field_validator("TOKEN_LIMIT")
+    @classmethod
+    def _token_limit_range(cls, v: int) -> int:
+        if v < 500:
+            raise ValueError(f"TOKEN_LIMIT must be ≥ 500, got {v}")
         return v
 
     # ── Pydantic Settings Configuration ────────────────────────────────

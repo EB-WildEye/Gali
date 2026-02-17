@@ -10,6 +10,7 @@ authors = [{ name = "Gali Team" }]
 dependencies = [
     "pypdf>=4.0.0",
     "langchain>=0.2.0",
+    "langchain-core>=0.2.0",
     "langchain-google-genai>=1.0.0",
     "langchain-experimental>=0.0.50",
     "lancedb>=0.4.0",

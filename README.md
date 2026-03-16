@@ -70,11 +70,11 @@ flowchart TB
     subgraph INFRA["AWS Infrastructure"]
         GW["API Gateway"]
         S3D["S3 gali-documents"]
-        S3V["S3 gali-vectors"]
-        ATLAS["MongoDB Atlas"]
+        MONGO["MongoDB<br/>(Session Store — ephemeral)"]
+        LANCE["LanceDB<br/>(Vector Store — RAG knowledge)"]
         SM["Secrets Manager"]
         EB["EventBridge"]
-    end
+    end  
 
     PATIENT["Patient 🖥️"] --> NEXT
     NEXT --> GW
@@ -88,13 +88,13 @@ flowchart TB
     L4 -.-> DB
     L3 -.-> CONF
 
-    L1 --> ATLAS
-    L2 --> ATLAS
-    L2 --> S3V
+    L1 --> MONGO
+    L2 --> MONGO
+    L2 --> LANCE
     L2 --> GEMINI["Gemini API"]
-    L3 --> S3V
+    L3 --> LANCE
     L3 --> GEMINI
-    L4 --> ATLAS
+    L4 --> MONGO
     SM -.-> CONF
 ```
 
@@ -106,7 +106,7 @@ flowchart TB
 Gali/
 │
 ├── shared/                          ← SHARED DATA LAYER (Lambda Layer)
-│   ├── db.py                        ← MongoDB connection + all DB operations
+│   ├── db.py                        ← MongoDB session store (chat history ONLY — not RAG)
 │   ├── pii.py                       ← PII scrubbing (IDs, phones, emails)
 │   └── config.py                    ← Secrets Manager helper + env settings
 │
@@ -151,6 +151,10 @@ Gali/
 
 ## UML — Shared Layer
 
+> **MongoDB = Session Store only.** It holds ephemeral chat messages (deleted after 24 h).
+> **LanceDB = Vector Store (RAG).** It holds embedded medical/protocol documents.
+> No vector search or RAG is ever performed on MongoDB.
+
 ```mermaid
 classDiagram
     class db {
@@ -183,11 +187,11 @@ classDiagram
 
 | File | Function | Description |
 |------|----------|-------------|
-| **db.py** | `get_collection()` | Returns MongoDB `chat_history` collection (lazy connects) |
+| **db.py** | `get_collection()` | Returns MongoDB `chat_history` collection — **session store only** (lazy connects) |
 | | `save_turn(sid, user, bot)` | Scrubs PII → adds `created_at` timestamp → inserts both messages |
-| | `get_messages(sid, limit=20)` | Returns last N messages oldest-first `[{role, content}]` |
-| | `get_chat_history(sid)` | Returns messages in Gemini format `[{role: "model", parts: [...]}]` |
-| | `delete_old_messages(hours=24)` | Deletes messages where `created_at < now - hours` → returns count |
+| | `get_messages(sid, limit=20)` | Returns last N session messages oldest-first `[{role, content}]` — plain list, no vectors |
+| | `get_chat_history(sid)` | Returns session messages as Gemini-format list — **conversation memory, NOT RAG retrieval** |
+| | `delete_old_messages(hours=24)` | Deletes ephemeral messages where `created_at < now - hours` → returns count |
 | | `check_connection()` | Pings MongoDB to verify connectivity |
 | **pii.py** | `remove_pii(text)` | Regex-scrubs Israeli IDs (9 digits), phone numbers, emails |
 | **config.py** | `get_mongo_uri()` | Fetches `/gali/MONGO_URI` from Secrets Manager (cached 5 min) |
@@ -262,7 +266,8 @@ classDiagram
 
     handler --> GeminiClient : _init_services creates
     handler --> VectorStore : _init_services creates
-    handler --> db : save_turn(), get_chat_history()
+    handler --> db : save_turn(), get_chat_history() — session memory only
+    note for handler "Step 1: MongoDB session context\nStep 2: LanceDB RAG search\nStep 3: Gemini generate"
     handler ..> ChatRequest : validates input
     handler ..> ChatResponse : returns
     VectorStore --> GeminiClient : uses embed_text()
@@ -273,7 +278,7 @@ classDiagram
 |------|----------|-------------|
 | **handler.py** | `_init_services()` | Lazy-init GeminiClient + VectorStore (reused across warm invocations) |
 | | `sanitize_user_input(text)` | NFKC normalize → strip invisible chars → detect injection patterns |
-| | `handle_chat_message(body)` | Full RAG: sanitize → search → get history → generate → save → respond |
+| | `handle_chat_message(body)` | **3-step flow:** ① fetch session history from MongoDB ② search LanceDB for RAG knowledge ③ generate via Gemini with both contexts → save → respond |
 | **llm.py** | `GeminiClient.__init__()` | Connects to Gemini API, sets system_instruction |
 | | `embed_text(text)` | Returns 768-dim embedding vector |
 | | `generate_answer(query, ctx, history)` | Creates chat with history → sends context+query → retries on 503/429 |
@@ -396,35 +401,48 @@ classDiagram
 
 ### Chat Flow (λ2)
 
+> **3-step flow:** MongoDB (session memory) + LanceDB (RAG knowledge) → Gemini
+
 ```mermaid
 sequenceDiagram
     participant UI as Frontend
     participant GW as API Gateway
     participant Chat as λ2 Chat
-    participant Shared as shared/db
-    participant Lance as LanceDB (S3)
+    participant Mongo as MongoDB (Session Store)
+    participant Lance as LanceDB (Vector Store / RAG)
     participant Gemini as Gemini API
-    participant Mongo as MongoDB Atlas
 
     UI->>GW: POST /chat {query, session_id}
     GW->>Chat: invoke
     Chat->>Chat: sanitize_user_input(query)
+
+    rect rgb(40, 40, 80)
+    Note right of Chat: Step 1 — Session context (MongoDB)
+    Chat->>Mongo: get_chat_history(session_id)
+    Mongo-->>Chat: messages[] (plain list, last 24h)
+    end
+
+    rect rgb(40, 80, 40)
+    Note right of Chat: Step 2 — Knowledge retrieval (LanceDB RAG)
     Chat->>Lance: search_similar(query)
-    Lance-->>Chat: top 4 chunks
-    Chat->>Shared: get_chat_history(session_id)
-    Shared->>Mongo: find({session_id})
-    Mongo-->>Shared: messages[]
-    Shared-->>Chat: Gemini-format history
-    Chat->>Gemini: chat.send_message(context + query)
+    Lance-->>Chat: top 4 document chunks
+    end
+
+    rect rgb(80, 40, 40)
+    Note right of Chat: Step 3 — Generate (Gemini)
+    Chat->>Gemini: generate_answer(query, docs, session_history)
     Gemini-->>Chat: answer
-    Chat->>Shared: save_turn(session_id, query, answer)
-    Shared->>Shared: remove_pii(text)
-    Shared->>Mongo: insert_many([user, assistant])
-    Chat-->>GW: {answer, sources}
+    end
+
+    Chat->>Mongo: save_turn(session_id, query, answer)
+    Mongo->>Mongo: remove_pii → insert
+    Chat-->>GW: {answer, sources, session_id}
     GW-->>UI: JSON response
 ```
 
 ### Ingestion Flow (λ3)
+
+> Stores embedded document vectors in **LanceDB** (the RAG knowledge base).
 
 ```mermaid
 sequenceDiagram
@@ -432,7 +450,7 @@ sequenceDiagram
     participant S3D as S3 gali-documents
     participant Ingest as λ3 Ingestion
     participant Gemini as Gemini API
-    participant S3V as S3 gali-vectors
+    participant Lance as LanceDB (Vector Store)
 
     Admin->>S3D: Upload Protocol.pdf
     S3D->>Ingest: PutObject event
@@ -444,24 +462,23 @@ sequenceDiagram
         Ingest->>Gemini: embed_text(chunk)
         Gemini-->>Ingest: vector[768]
     end
-    Ingest->>S3V: table.add(chunks)
+    Ingest->>Lance: table.add(chunks)
     Ingest-->>Admin: ✅ 54 chunks stored
 ```
 
 ### Cleanup Flow (λ4)
 
+> Purges **ephemeral session messages** from MongoDB (not vectors — those stay in LanceDB).
+
 ```mermaid
 sequenceDiagram
     participant EB as EventBridge
     participant Clean as λ4 Cleanup
-    participant Shared as shared/db
-    participant Mongo as MongoDB Atlas
+    participant Mongo as MongoDB (Session Store)
 
     EB->>Clean: Scheduled trigger (hourly)
-    Clean->>Shared: delete_old_messages(24)
-    Shared->>Mongo: delete_many({created_at < 24h ago})
-    Mongo-->>Shared: deleted_count
-    Shared-->>Clean: count
+    Clean->>Mongo: delete_old_messages(24)
+    Mongo-->>Clean: deleted_count
     Clean->>Clean: logger.info(deleted: count)
 ```
 
@@ -476,7 +493,7 @@ sequenceDiagram
 | `agent/config.py` | `shared/config.py` | **Moved** — reads from Secrets Manager |
 | `agent/llm.py` | `endpoints/chat/llm.py` | **Moved** — only chat service needs it |
 | `agent/vectorstore.py` | `endpoints/chat/vectorstore.py` | **Moved** — only chat service needs it |
-| `agent/history.py` | `shared/db.py` | **Refactored** — becomes shared DB API |
+| `agent/history.py` | `shared/db.py` | **Refactored** — becomes shared session store (chat history only, no RAG) |
 | `agent/prompt.py` | `endpoints/chat/prompt.py` | **Moved** — only chat service needs it |
 | `ingestion/main.py` | `data/handler.py` | **Rewritten** — S3 trigger instead of CLI |
 | `ui/app.py` | `frontend/src/` | **Rewritten** — Next.js replaces Streamlit |
@@ -499,8 +516,9 @@ sequenceDiagram
 
 ## Future Roadmap: MongoDB → DynamoDB
 
-> The initial deployment uses **MongoDB Atlas** for chat history.
+> The initial deployment uses **MongoDB** as a **short-term session store** for ephemeral chat history.
 > A future iteration will migrate to **AWS DynamoDB** for full AWS-native integration.
+> **Note:** This migration affects only the session store. **LanceDB** remains the RAG vector store regardless.
 
 ### Why DynamoDB?
 
@@ -587,9 +605,9 @@ flowchart TB
 
     subgraph AWS["AWS Native"]
         GW["API Gateway"]
-        DYNAMO["DynamoDB<br/>+ TTL auto-delete"]
+        DYNAMO["DynamoDB<br/>(Session Store) + TTL auto-delete"]
         S3D["S3 documents"]
-        S3V["S3 vectors"]
+        LANCE["LanceDB<br/>(Vector Store — RAG)"]
     end
 
     PATIENT["Patient 🖥️"] --> NEXT --> GW
@@ -598,9 +616,9 @@ flowchart TB
 
     L1 & L2 -.-> DB
     DB --> DYNAMO
-    L2 --> S3V
+    L2 --> LANCE
     L2 & L3 --> GEMINI["Gemini API"]
-    L3 --> S3V
+    L3 --> LANCE
 ```
 
-**Result**: 3 Lambdas instead of 4, zero external dependencies (no Atlas), fully AWS-native.
+**Result**: 3 Lambdas instead of 4, zero external dependencies (no Atlas), fully AWS-native. LanceDB remains the RAG vector store.
